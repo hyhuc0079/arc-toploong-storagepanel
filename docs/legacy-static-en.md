@@ -1,10 +1,12 @@
-# Arc TOPLOONG StoragePanel
+# Legacy: static DTS and standalone panel patch
 
-[中文](README.md)
+> Historical documentation. See [Integration V2](../README.en.md) for the current version.
+
+[中文](legacy-static-zh.md)
 
 A custom physical-bay mapping and StorageManager panel for the TOPLOONG 4U 24-bay NAS chassis (24 front bays + one internal SATA SSD, plus the native M.2 area). This is an independent experimental project, not an official Arc or Synology component.
 
-![Real DSM screenshot, cropped and compressed](docs/storagepanel.webp)
+![Real DSM screenshot, cropped and compressed](storagepanel.webp)
 
 ## Tested configuration
 
@@ -23,10 +25,10 @@ Arc loads a custom DTS at build time. DSM uses the internal_slot@N node index as
 
 Back up important data, your loader image/configuration, and ensure you have a recovery path before proceeding. Do not perform the test while an array is rebuilding.
 
-1. Inspect your actual PCIe paths, ata_port_no and SAS bay_identifier values. Follow the [DTS mapping guide](docs/dts-mapping.md). The [example SA6400.dts](examples/SA6400.dts) is specific to the tested machine, not a universal configuration.
+1. Inspect your actual PCIe paths, ata_port_no and SAS bay_identifier values. Follow the [DTS mapping guide](dts-mapping.md). The [example SA6400.dts](../examples/SA6400.dts) is specific to the tested machine, not a universal configuration.
 2. Restart Arc into Config Mode. Upload your validated DTS via File Manager to /mnt/p3/users/SA6400.dts. Run **Build Loader**, then Boot DSM. No loader update or DSM reinstall is required. If the Custom DTS dialog waits for ZModem (rz), cancel it and use File Manager instead.
 3. Verify /etc/user_model.dts, decompile /run/model.dtb, run synodisk --enum -t internal, check /proc/mdstat and mounted volumes. The test used Disk IDs 1, 2 and 25. Do not initialize or format disks if they disappear or arrays become abnormal.
-4. Copy [toploong_panel_test_v2.py](toploong_panel_test_v2.py) to DSM, e.g. /tmp/. Run as root with Python 3. On a fresh installation the expected SHA-256 of the live storage_panel.js is:
+4. Copy [toploong_panel_test_v2.py](../toploong_panel_test_v2.py) to DSM, e.g. /tmp/. Run as root with Python 3. On a fresh installation the expected SHA-256 of the live storage_panel.js is:
 
 ```text
 678c041572871f0060c6f2da74bfc96f40d8a4c71363d2303345916c38c6edca

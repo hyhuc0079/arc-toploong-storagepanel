@@ -1,10 +1,12 @@
-# Arc TOPLOONG StoragePanel
+# 历史方案：静态 DTS 与独立面板补丁
+
+> 历史文档，仅用于了解早期静态方案。当前推荐版本见 [Integration V2](../README.md)。
 
 **拓普龙 4U 24 盘位机箱的 DSM 物理盘位映射与自定义面板（24+1 SATA / M.2）。**
 
-[English](README.en.md)
+[English](legacy-static-en.md)
 
-![实际 DSM 运行截图（裁剪并压缩）](docs/storagepanel.webp)
+![实际 DSM 运行截图（裁剪并压缩）](storagepanel.webp)
 
 这是一个独立的实验性补丁项目，使用 [Arc Loader](https://github.com/AuxXxilium/arc) 原生 Custom DTS 功能和 DSM 原生 StorageManager 渲染组件，不修改内核、LKM 或 HBA 驱动。
 
@@ -37,9 +39,9 @@
 
 ## 1. 配置自定义 DTS
 
-[examples/SA6400.dts](examples/SA6400.dts) 是本次成功启动的完整示例，**不是可直接用于所有机器的配置**。它保留本机 NVMe 和 USB 节点，只定义三块当前安装的 SATA 磁盘。
+[examples/SA6400.dts](../examples/SA6400.dts) 是本次成功启动的完整示例，**不是可直接用于所有机器的配置**。它保留本机 NVMe 和 USB 节点，只定义三块当前安装的 SATA 磁盘。
 
-先按 [DTS 生成与验证指南](docs/dts-mapping.md) 从自己的系统采集映射并生成 DTS。确认 PCIe 路径、端口、Bay ID、NVMe 和 USB 均正确。
+先按 [DTS 生成与验证指南](dts-mapping.md) 从自己的系统采集映射并生成 DTS。确认 PCIe 路径、端口、Bay ID、NVMe 和 USB 均正确。
 
 1. 通过 Arc Control 的 Restart to Config Mode 进入 Arc 配置环境。
 2. 使用 Arc File Manager 上传 DTS 到 `/mnt/p3/users/SA6400.dts`（本例机型为 SA6400）。
@@ -60,7 +62,7 @@ df -h | grep volume
 
 ## 2. 安装 StoragePanel V2
 
-下载 [toploong_panel_test_v2.py](toploong_panel_test_v2.py)，通过 SCP 等方式传入 DSM（例如 /tmp/）。需要 Python 3 和 root 权限。先确认 Arc 原面板为 RACK_24_Bay-1X1。
+下载 [toploong_panel_test_v2.py](../toploong_panel_test_v2.py)，通过 SCP 等方式传入 DSM（例如 /tmp/）。需要 Python 3 和 root 权限。先确认 Arc 原面板为 RACK_24_Bay-1X1。
 
 ```sh
 P=/usr/local/packages/@appstore/StorageManager/ui
