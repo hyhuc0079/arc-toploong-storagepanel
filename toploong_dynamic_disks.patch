@@ -1,0 +1,260 @@
+--- disks.sh
++++ disks.sh
+@@ -495,6 +495,95 @@
+   echo
+ }
+ 
++# TOPLOONG 24+1: site-specific physical slots. Never use PHY as ata_port.
++_toploong_enabled() {
++  [ "$(__get_conf_kv unique)" = "synology_epyc7002_sa6400" ] &&
++    [ ! -f /etc/user_model.dts ] && [ ! -f /addons/model.dts ]
++}
++
++# $1 sysfs block path, $2 normalized PCI root, $3 emitted ATA port,
++# $4 original syno_block_info. Return a slot only for the verified topology.
++_toploong_slot() {
++  _TL_RAW="$(printf '%s\n' "$4" | sed -n 's/^ata_port_no=//p')"
++  case "${_TL_RAW}" in '' | *[!0-9]*) return 1 ;; esac
++  [ "${_TL_RAW}" = "$3" ] || return 1
++  case "${2#0000:}" in
++    00:11.4)
++      [ "$3" = 3 ] || return 1
++      echo 25
++      ;;
++    00:03.2,00.0)
++      _TL_PATH="$(readlink -f "$1/device")" || return 1
++      _TL_END="$(printf '%s\n' "${_TL_PATH}" | grep -oE 'end_device-[^/]+' | tail -1)"
++      [ -n "${_TL_END}" ] || return 1
++      _TL_SAS="/sys/class/sas_device/${_TL_END}"
++      _TL_ENC="$(cat "${_TL_SAS}/enclosure_identifier" 2>/dev/null)" || return 1
++      [ "${_TL_ENC}" = "0x500605b0000272bf" ] || return 1
++      _TL_BAY="$(cat "${_TL_SAS}/bay_identifier" 2>/dev/null)" || return 1
++      case "${_TL_BAY}" in 0 | [1-9] | 1[0-9] | 2[0-3]) ;; *) return 1 ;; esac
++      echo "$((_TL_BAY + 1))"
++      ;;
++    *) return 1 ;;
++  esac
++}
++
++# Existing top-level nodes/properties must survive a live rebuild unchanged.
++# Compare decompiled trees as normalized, single-line blocks, independent of
++# node order. An unrecognized format or missing runtime DTB is a hard stop.
++_toploong_tree_records() {
++  awk '
++    /^[[:space:]]*\/dts-v1\// {next}
++    /^[[:space:]]*\/ \{/ {root=1; next}
++    root && /^[[:space:]]*};[[:space:]]*$/ && depth==0 {root=0; next}
++    root {
++      line=$0
++      gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
++      if (line=="") next
++      if (depth==0) rec=line; else rec=rec " " line
++      # dtc emits braces at the end of node-open and node-close lines.
++      if (line ~ /\{$/) depth++
++      if (line ~ /^};$/) depth--
++      if (depth==0) {print rec; n++}
++      if (depth<0) bad=1
++    }
++    END {if (root || depth || bad || n<1) exit 1}
++  ' "$1"
++}
++
++_toploong_live_add_only() (
++  _TL_TMP="$(mktemp -d /tmp/toploong-check.XXXXXX)" || exit 1
++  trap 'rm -rf "${_TL_TMP}"' EXIT
++  [ -s /run/model.dtb ] || exit 1
++  dtc -I dtb -O dts /run/model.dtb >"${_TL_TMP}/old" 2>/dev/null || exit 1
++  dtc -I dtb -O dts "$1" >"${_TL_TMP}/new" 2>/dev/null || exit 1
++  _toploong_tree_records "${_TL_TMP}/old" >"${_TL_TMP}/old.records" || exit 1
++  _toploong_tree_records "${_TL_TMP}/new" >"${_TL_TMP}/new.records" || exit 1
++  # No existing property/node may change or disappear. Only new SATA nodes
++  # may be added. This deliberately rejects live relocation and removals.
++  while IFS= read -r _TL_LINE; do
++    grep -Fxq -- "${_TL_LINE}" "${_TL_TMP}/new.records" || exit 1
++  done <"${_TL_TMP}/old.records"
++  while IFS= read -r _TL_LINE; do
++    grep -Fxq -- "${_TL_LINE}" "${_TL_TMP}/old.records" && continue
++    case "${_TL_LINE}" in internal_slot@*'protocol_type = "sata";'*) ;; *) exit 1 ;; esac
++  done <"${_TL_TMP}/new.records"
++  exit 0
++)
++
++# The normal lookup also needs to confirm the physical slot, not just port.
++_toploong_exact_slot() {
++  awk -v node="internal_slot@$2" -v pci="$3" -v port="$4" '
++    $1 ~ /^internal_slot@/ {in_slot=($1==node); matched=0}
++    in_slot && $1=="pcie_root" && $3=="\"" pci "\";" {matched=1}
++    in_slot && matched && $1=="ata_port" {
++      x=$3; sub(/^<0x0*/, "", x); sub(/>;$/, "", x)
++      if (x=="") x="0"
++      if (x==port) found=1
++    }
++    END {exit !found}
++  ' "$1"
++}
++
+ # Queue one internal_slot for a SATA/HBA disk: $1 pcie_root, $2 driver,
+ # $3 ata_port, $4 PHYSDEVPATH, $5 the controller's own PCI address. Also
+ # records the driver name its controller was first queued with - every slot on
+@@ -526,15 +615,20 @@
+   # lack per-key flags. The raw port goes last: "%02X" reads a padded "0010" as
+   # octal.
+   # shellcheck disable=SC2086
+-  printf '%s %s %04d %04d %04d %s %s %s\n' "${_QSS_T}" "${5:-${1}}" ${_QSS_K} "${3}" "${1}" "${2}" "${3}" >>"${SLOTS}.q"
++  _QSS_SLOT=0
++  if [ "${_TL_MODE}" = 1 ]; then
++    _QSS_SLOT="$(_toploong_slot "${6}" "${1}" "${3}" "${_SBI}")" || _QSS_SLOT=0
++  fi
++  printf '%s %s %04d %04d %04d %s %s %s %s\n' "${_QSS_T}" "${5:-${1}}" ${_QSS_K} "${3}" "${1}" "${2}" "${3}" "${_QSS_SLOT}" >>"${SLOTS}.q"
+ }
+ 
+ # Append one internal_slot for a SATA/HBA disk: $1 pcie_root, $2 driver,
+ # $3 ata_port.
+ _emit_sata_slot() {
+   COUNT=$((COUNT + 1))
++  _TL_EMIT="${4:-${COUNT}}"
+   {
+-    echo "    internal_slot@${COUNT} {"
++    echo "    internal_slot@${_TL_EMIT} {"
+     echo '        protocol_type = "sata";'
+     echo "        ${2} {"
+     echo "            pcie_root = \"${1}\";"
+@@ -549,6 +643,8 @@
+   _log dtModel
+ 
+   UNIQUE=$(__get_conf_kv unique)
++  _TL_MODE=0
++  _toploong_enabled && _TL_MODE=1
+ 
+   _wait_disks_stable "/sys/block/sata* /sys/block/sd* /sys/block/nvme*"
+ 
+@@ -624,7 +720,7 @@
+       # logs, and this loop previously emitted nothing at all.
+       _log "slot: ${_F} -> ${_PC} port ${_AT} (${_DR})"
+       [ -n "${_PP}" ] && _SEEN_PHYSDEV="${_SEEN_PHYSDEV:+${_SEEN_PHYSDEV} }${_PP}"
+-      _queue_sata_slot "${_PC}" "${_DR}" "${_AT}" "${_PP}" "${_BDF}"
++      _queue_sata_slot "${_PC}" "${_DR}" "${_AT}" "${_PP}" "${_BDF}" "${_F}"
+     done
+ 
+     # Second pass: HBA disks that never became sataN.
+@@ -685,15 +781,37 @@
+       _claim_slot_port "${_PC}" "${_AT}" || { _log "no slot for ${_F}"; continue; }
+       _AT="${_SLOT_PORT}"
+       _log "hba disk without sata alias: ${_F} -> ${_PC} port ${_AT} (${_DR})"
+-      _queue_sata_slot "${_PC}" "${_DR}" "${_AT}" "${_PP}" "${_BDF}"
++      _queue_sata_slot "${_PC}" "${_DR}" "${_AT}" "${_PP}" "${_BDF}" "${_F}"
+     done
+ 
+     # Write the queued slots out in bay order - see _queue_sata_slot. Read from
+     # a file, not a pipe: COUNT has to survive the loop for the NVMe slots.
+     LC_ALL=C sort "${SLOTS}.q" >"${SLOTS}.s"
+-    while read -r _Q_T _Q_B _Q_E _Q_K _Q_P _Q_PC _Q_DR _Q_AT; do
+-      _emit_sata_slot "${_Q_PC}" "${_Q_DR}" "${_Q_AT}"
+-      _log "internal_slot@${COUNT}: ${_Q_PC} port ${_Q_AT}"
++    if [ "${_TL_MODE}" = 1 ]; then
++      # All candidates must have real, distinct slots; do not partially apply.
++      if ! awk 'NF!=9 || $9<1 || $9>25 || seen[$9]++ {bad=1}
++                $9==25 {ssd=1}
++                END {exit (bad || !ssd)}' "${SLOTS}.s"; then
++        _log "TOPLOONG: invalid topology or port; dynamic mapping not applied"
++        if [ "${_TL_ACTION}" = "--update" ]; then
++          rm -f "${SLOTS}" "${SLOTS}.q" "${SLOTS}.s"
++          return 1
++        fi
++        # During boot keep Arc's original automatic mapping instead of
++        # publishing a half-built custom tree. Check logs and IDs before use.
++        _TL_MODE=0
++        _log "TOPLOONG: boot fallback to stock automatic slot numbering"
++      else
++        _log "TOPLOONG: physical slot mapping enabled"
++      fi
++    fi
++    while read -r _Q_T _Q_B _Q_E _Q_K _Q_P _Q_PC _Q_DR _Q_AT _Q_SLOT; do
++      if [ "${_TL_MODE}" = 1 ]; then
++        _emit_sata_slot "${_Q_PC}" "${_Q_DR}" "${_Q_AT}" "${_Q_SLOT}"
++      else
++        _emit_sata_slot "${_Q_PC}" "${_Q_DR}" "${_Q_AT}"
++      fi
++      _log "internal_slot@${_TL_EMIT}: ${_Q_PC} port ${_Q_AT}"
+     done <"${SLOTS}.s"
+     rm -f "${SLOTS}.q" "${SLOTS}.s"
+ 
+@@ -790,6 +908,17 @@
+     rm -f "${SLOTS}"
+   fi
+ 
++  if [ "${_TL_MODE}" = 1 ] && [ "${_TL_ACTION}" = "--update" ]; then
++    _TL_CANDIDATE="/tmp/toploong-model.$$.dtb"
++    if ! dtc -I dts -O dtb "${DEST}" >"${_TL_CANDIDATE}" ||
++       ! _toploong_live_add_only "${_TL_CANDIDATE}"; then
++      _log "TOPLOONG: refusing live remap; existing tree retained; inspect and reboot"
++      rm -f "${DEST}" "${_TL_CANDIDATE}"
++      return 1
++    fi
++    rm -f "${_TL_CANDIDATE}"
++  fi
++
+   MAXDISKS=$(grep -c "internal_slot@" "${DEST}" 2>/dev/null)
+   if _check_user_conf "maxdisks"; then
+     MAXDISKS=$(($(__get_conf_kv maxdisks)))
+@@ -800,6 +929,11 @@
+   if ! _check_rootraidstatus && [ "${MAXDISKS:-0}" -gt 26 ]; then
+     MAXDISKS=26
+     _log "set maxdisks=26 [${MAXDISKS:-0}]"
++  fi
++  if [ "${_TL_MODE}" = 1 ] && [ "${MAXDISKS:-0}" -lt 25 ]; then
++    _log "TOPLOONG: maxdisks below 25; refusing custom tree"
++    rm -f "${DEST}"
++    return 1
+   fi
+   __set_conf_kv "maxdisks" "${MAXDISKS:-0}"
+   _log "maxdisks=${MAXDISKS:-0}"
+@@ -880,6 +1014,27 @@
+   TEMP_DTS="/tmp/model.dts"
+   dtc -I dtb -O dts /etc/model.dtb 2>/dev/null | sed 's/pcie_root = "0000:/pcie_root = "/' >"${TEMP_DTS}"
+ 
++  if _toploong_enabled; then
++    case "${F}:${_KEY}" in
++      sata*:00:03.2,00.0 | sd*:00:03.2,00.0 | sata*:00:11.4 | sd*:00:11.4)
++        _TL_EXPECT="$(_toploong_slot "/sys/block/${F}" "${_PC}" "${ATAPORT}" "${_SBI}")" || {
++          _log "TOPLOONG: ${F} has no verified physical mapping"
++          rm -f "${TEMP_DTS}"
++          return 1
++        }
++        if _toploong_exact_slot "${TEMP_DTS}" "${_TL_EXPECT}" "${_KEY}" "$(printf '%x' "${ATAPORT}")"; then
++          _log "TOPLOONG: ${F} already matches internal_slot@${_TL_EXPECT}"
++          rm -f "${TEMP_DTS}"
++          return 0
++        fi
++        rm -f "${TEMP_DTS}"
++        _log "TOPLOONG: ${F} needs slot ${_TL_EXPECT}; checking add-only rebuild"
++        dtModel
++        return $?
++        ;;
++    esac
++  fi
++
+   sata_slot_find=""
+   nvme_slot_find=""
+   usb_slot_find=""
+@@ -1184,10 +1339,12 @@
+ 
+ checkSynoboot
+ 
++_TL_ACTION="${1:-}"
+ case ${1} in
+   "--create")
+     if [ "$(__get_conf_kv supportportmappingv2)" = "yes" ]; then
+       dtModel
++      exit $?
+     else
+       nondtModel
+     fi
+@@ -1210,6 +1367,7 @@
+       # instead of replacing it. Keeping the guard only meant a disk plugged
+       # into a slot the upload does not describe never got a bay at all.
+       dtUpdate "${2:-}"
++      exit $?
+     else
+       # Non-DT has no per-disk state to patch: the port masks are derived from
+       # the whole disk set, so any change means recomputing them - unless the
